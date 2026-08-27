@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mock Server — Response Switchboard</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --border: #262b36;
+    --text: #e7e9ee;
+    --muted: #8b93a7;
+    --accent: #5b8cff;
+    --green: #2fbf71;
+    --amber: #e8a23d;
+    --red: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .topbar-row { display: flex; gap: 10px; align-items: center; }
+  .topbar input#search {
+    flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 12px; border-radius: 7px; font-size: 13px; min-width: 120px;
+  }
+  .scenario-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .scenario-btn {
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 4px 10px; border-radius: 7px; font-size: 12px; cursor: pointer;
+  }
+  .scenario-btn.builtin { border-color: var(--accent); }
+  .scenario-btn.save-new { border-style: dashed; color: var(--muted); }
+
+  /* ---- Columns ---- */
+  .columns { flex: 1; display: flex; min-height: 0; }
+  .col { overflow-y: auto; min-height: 0; }
+  .col-head {
+    position: sticky; top: 0; background: var(--bg);
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 12px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    z-index: 1;
+  }
+  .back-btn {
+    display: none; background: none; border: none; color: var(--accent);
+    font-size: 14px; cursor: pointer; padding: 0 4px;
+  }
+  .col-cats { width: 240px; flex-shrink: 0; border-right: 1px solid var(--border); }
+  .col-eps { width: 340px; flex-shrink: 0; border-right: 1px solid var(--border); }
+  .col-detail { flex: 1; }
+
+  .cat-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; cursor: pointer; user-select: none;
+    border-left: 3px solid transparent; font-size: 13px;
+  }
+  .cat-row:hover { background: var(--card); }
+  .cat-row.active { background: var(--card); border-left-color: var(--cat-accent, var(--accent)); }
+  .cat-row.dimmed { opacity: .35; }
+  .cat-row .icon { font-size: 15px; }
+  .cat-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cat-row .count {
+    font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 8px; flex-shrink: 0;
+  }
+
+  .ep-row {
+    display: none;
+    padding: 9px 12px; cursor: pointer; user-select: none;
+    border-left: 3px solid transparent;
+  }
+  .ep-row.visible { display: block; }
+  .ep-row:hover { background: var(--card); }
+  .ep-row.active { background: var(--card); border-left-color: var(--ep-accent, var(--accent)); }
+  .ep-row .row-top { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 0; }
+  .ep-row .label { font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .ep-row .path { font-size: 11px; }
+  .eps-empty { display: none; padding: 16px 12px; color: var(--muted); font-size: 13px; }
+
+  .detail-empty { padding: 40px 24px; color: var(--muted); font-size: 13px; text-align: center; }
+  .detail-host { padding: 16px; }
+
+  /* ---- Endpoint card (same DOM the JS has always driven) ---- */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--card-accent, var(--border));
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+    max-width: 720px;
+  }
+  .card-header { display: flex; justify-content: space-between; align-items: center; }
+  .badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+  .net-badge { color: var(--amber); border-color: var(--amber); }
+  .custom-badge { color: var(--accent); border-color: var(--accent); }
+  .code-badge.b2xx { color: var(--green); border-color: var(--green); }
+  .code-badge.b4xx { color: var(--amber); border-color: var(--amber); }
+  .code-badge.b5xx { color: var(--red); border-color: var(--red); }
+  .card-details { margin-top: 12px; }
+  .meta { min-width: 0; }
+  .method {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-right: 8px;
+    background: #23273a;
+    color: var(--accent);
+  }
+  .path { font-size: 13px; color: var(--text); font-family: ui-monospace, monospace; }
+  .codes {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .code-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    padding: 6px 12px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .code-btn:hover { border-color: var(--accent); color: var(--text); }
+  .code-btn.active {
+    color: #0f1115;
+  }
+  .code-btn.active.c2xx { background: var(--green); border-color: var(--green); }
+  .code-btn.active.c4xx { background: var(--amber); border-color: var(--amber); }
+  .code-btn.active.c5xx { background: var(--red); border-color: var(--red); }
+  .variants { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .variant-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .variant-btn:hover { border-color: var(--accent); color: var(--text); }
+  .variant-btn.active { border-color: var(--accent); color: var(--accent); }
+  .link-btn {
+    background: none; border: none; color: var(--accent);
+    font-size: 12px; cursor: pointer; padding: 0; margin-top: 8px;
+  }
+  .editor-panel { margin-top: 8px; }
+  .editor-panel textarea {
+    width: 100%; background: #0b0d12; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-family: ui-monospace, monospace; font-size: 12px; padding: 8px;
+  }
+  .editor-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .network-panel { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .network-panel input, .network-panel select { background: #0b0d12; color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+
+  /* ---- Bottom request log ---- */
+  .log-panel {
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 34vh;
+  }
+  .log-header { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; flex-shrink: 0; }
+  .log-body { display: none; }
+  .log-panel.open .log-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; margin-top: 8px; min-height: 0;
+  }
+  .log-empty { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  .log-code.b2xx { color: var(--green); }
+  .log-code.b4xx { color: var(--amber); }
+  .log-code.b5xx { color: var(--red); }
+  .log-entry { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 12px; }
+  .log-entry .top-row { display: flex; justify-content: space-between; color: var(--muted); }
+  .log-entry pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    opacity: 0;
+    transition: all .25s ease;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .add-row { padding: 10px 12px; }
+  .add-row .link-btn { margin-top: 0; }
+  .inline-form {
+    display: none; flex-direction: column; gap: 6px; padding: 10px 12px;
+    border-top: 1px solid var(--border); font-size: 12px;
+  }
+  .inline-form.open { display: flex; }
+  .inline-form input, .inline-form select, .inline-form textarea {
+    background: #0b0d12; color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 5px 8px; font-size: 12px;
+  }
+  .inline-form textarea { font-family: ui-monospace, monospace; }
+  .row-actions { margin-left: auto; display: none; gap: 4px; flex-shrink: 0; }
+  .cat-row:hover .row-actions { display: inline-flex; }
+  .row-actions button {
+    background: none; border: none; cursor: pointer; font-size: 12px;
+    color: var(--muted); padding: 0 2px;
+  }
+  .row-actions button:hover { color: var(--text); }
+  .chip-x {
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-left: 8px; width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(255,255,255,.12); color: var(--text);
+    font-size: 11px; line-height: 1; opacity: 0; transition: opacity .12s, background .12s;
+  }
+  .code-btn:hover .chip-x, .variant-btn:hover .chip-x { opacity: .85; }
+  .chip-x:hover { background: rgba(255,80,80,.35); opacity: 1 !important; }
+
+  /* ---- Mobile: drill-in, one pane at a time ---- */
+  @media (max-width: 900px) {
+    .col { display: none; width: 100%; border-right: none; }
+    .columns[data-pane="cats"] .col-cats { display: block; }
+    .columns[data-pane="eps"] .col-eps { display: block; }
+    .columns[data-pane="detail"] .col-detail { display: block; }
+    .back-btn { display: inline-block; }
+  }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <h1>Mock Server Switchboard</h1>
+      <input type="text" id="search" placeholder="Filter by path or label..." oninput="filterCards()">
+      <button class="code-btn" onclick="resetAll()">Reset all to defaults</button>
+      <a class="code-btn" href="/admin/export" download style="text-decoration:none;">Export</a>
+      <button class="code-btn" onclick="document.getElementById('import-file').click()">Import</button>
+      <input type="file" id="import-file" accept="application/json" style="display:none" onchange="importDefinitions(this)">
+      <button class="code-btn" onclick="restoreBuiltins()">Restore built-ins</button>
+    </div>
+    <div class="scenario-bar" id="scenario-bar"></div>
+  </header>
+
+  <div class="columns" id="columns" data-pane="cats">
+    <nav class="col col-cats">
+      <div class="col-head">Categories</div>
+      {% for category, eps in grouped_endpoints.items() %}
+      <div class="cat-row" data-category="{{ category }}" data-count="{{ eps|length }}"
+           data-icon="{{ category_icons.get(category, '📦') }}"
+           data-color="{{ category_colors.get(category, '#5b8cff') }}"
+           style="--cat-accent: {{ category_colors.get(category, '#5b8cff') }}"
+           onclick="selectCategory(this.dataset.category)">
+        <span class="icon">{{ category_icons.get(category, '📦') }}</span>
+        <span class="name">{{ category }}</span>
+        <span class="count">{{ eps|length }}</span>
+        <span class="row-actions">
+          <button title="Edit" onclick="event.stopPropagation(); openCategoryForm('edit', this.closest('.cat-row'))">✎</button>
+          <button title="Delete" onclick="event.stopPropagation(); deleteCategory(this.closest('.cat-row').dataset.category)">🗑</button>
+        </span>
+      </div>
+      {% endfor %}
+      <div class="add-row"><button class="link-btn" onclick="openCategoryForm('add')">+ Add category</button></div>
+      <form class="inline-form" id="add-category-form" onsubmit="return submitCategoryForm(event)">
+        <input type="hidden" id="cat-form-mode" value="add">
+        <input type="hidden" id="cat-form-original" value="">
+        <input id="cat-form-name" placeholder="Category name" required>
+        <input id="cat-form-icon" placeholder="Icon emoji (e.g. 🧪)" maxlength="4">
+        <input id="cat-form-color" type="color" value="#5b8cff">
+        <div class="editor-actions">
+          <button class="code-btn" type="submit">Save</button>
+          <button class="code-btn" type="button" onclick="document.getElementById('add-category-form').classList.remove('open')">Cancel</button>
+        </div>
+      </form>
+    </nav>
+
+    <div class="col col-eps">
+      <div class="col-head">
+        <button class="back-btn" onclick="setPane('cats')">‹</button>
+        <span id="eps-title">Endpoints</span>
+      </div>
+      {% for category, eps in grouped_endpoints.items() %}
+        {% for key, cfg in eps.items() %}
+        <div class="ep-row" data-key="{{ key }}" data-category="{{ category }}"
+             style="--ep-accent: {{ category_colors.get(category, '#5b8cff') }}"
+             onclick="selectEndpoint(this.dataset.key)">
+          <div class="row-top">
+            <span class="method">{{ cfg.method }}</span>
+            <span class="label">{{ short_labels[key] }}</span>
+            {% set code_bucket = 'b2xx' if state[key].active_code < 400 else ('b5xx' if state[key].active_code >= 500 else 'b4xx') %}
+            <span class="badge code-badge {{ code_bucket }}">{{ state[key].active_code }}/{{ state[key].active_variant }}</span>
+            {% if state[key].custom_body is not none %}
+              <span class="badge custom-badge">custom</span>
+            {% endif %}
+            {% if state[key].network.delay or state[key].network.drop or state[key].network.flaky %}
+              <span class="badge net-badge">⚡</span>
+            {% endif %}
+          </div>
+          <div class="path">{{ cfg.path }}</div>
+        </div>
+        {% endfor %}
+      {% endfor %}
+      <div class="add-row"><button class="link-btn" onclick="openEndpointForm()">+ Add API</button></div>
+      <form class="inline-form" id="add-endpoint-form" onsubmit="return submitEndpointForm(event)">
+        <select id="ep-form-method">
+          <option>GET</option><option>POST</option><option>PUT</option>
+          <option>PATCH</option><option>DELETE</option>
+        </select>
+        <input id="ep-form-path" placeholder="/my/new/path or /x/<id>" required>
+        <textarea id="ep-form-body" rows="5" spellcheck="false">{}</textarea>
+        <div class="editor-actions">
+          <button class="code-btn" type="submit">Create</button>
+          <button class="code-btn" type="button" onclick="document.getElementById('add-endpoint-form').classList.remove('open')">Cancel</button>
+        </div>
+      </form>
+      <div class="eps-empty" id="eps-empty">No endpoints match.</div>
+    </div>
+
+    <div class="col col-detail">
+      <div class="col-head">
+        <button class="back-btn" onclick="setPane('eps')">‹</button>
+        <span id="detail-title">Endpoint</span>
+      </div>
+      <div class="detail-empty" id="detail-empty">Select an endpoint to configure its response.</div>
+      <div class="detail-host" id="detail-host"></div>
+    </div>
+  </div>
+
+  <div class="log-panel" id="log-panel">
+    <div class="log-header" onclick="toggleLog()">
+      <strong>Request log</strong> <span class="muted" id="log-hint">(click to expand)</span>
+    </div>
+    <div class="log-body" id="log-body"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- Every endpoint's full card lives here; selecting an endpoint moves its
+       node into #detail-host. The card DOM (data-key, badges, .variants) is
+       unchanged from the old layout, so all handlers below keep working. -->
+  <div id="card-store" style="display:none;">
+    {% for category, eps in grouped_endpoints.items() %}
+      {% for key, cfg in eps.items() %}
+      <div class="card" data-key="{{ key }}" data-active-variant="{{ state[key].active_variant }}" data-network='{{ state[key].network | tojson }}' style="--card-accent: {{ category_colors.get(category, '#5b8cff') }}">
+        <div class="card-header">
+          <div class="meta">
+            <div><span class="method">{{ cfg.method }}</span>
+              {% set code_bucket = 'b2xx' if state[key].active_code < 400 else ('b5xx' if state[key].active_code >= 500 else 'b4xx') %}
+              <span class="badge code-badge {{ code_bucket }}">{{ state[key].active_code }}/{{ state[key].active_variant }}</span>
+              {% if state[key].custom_body is not none %}
+                <span class="badge custom-badge">custom body</span>
+              {% endif %}
+              {% if state[key].network.delay or state[key].network.drop or state[key].network.flaky %}
+                <span class="badge net-badge">⚡ network sim</span>
+              {% endif %}
+            </div>
+            <div class="path">{{ cfg.path }}</div>
+          </div>
+          <span class="row-actions" style="display:inline-flex;">
+            <button title="Edit endpoint" onclick="openEndpointEdit('{{ key }}')">✎</button>
+            <button title="Delete endpoint" onclick="deleteEndpoint('{{ key }}')">🗑</button>
+          </span>
+        </div>
+        <div class="card-details" id="details-{{ key }}">
+          <div class="codes">
+            {% for code in cfg.responses.keys() %}
+              {% set bucket = 'c2xx' if code < 400 else ('c5xx' if code >= 500 else 'c4xx') %}
+              <button
+                class="code-btn {{ bucket }} {{ 'active' if state[key].active_code == code else '' }}"
+                data-code="{{ code }}"
+                onclick="setCode('{{ key }}', {{ code }}, this)">
+                {{ code }}<span class="chip-x" onclick="event.stopPropagation(); deleteCode('{{ key }}', {{ code }})">×</span>
+              </button>
+            {% endfor %}
+          </div>
+          <div class="editor-actions">
+            <button class="link-btn" onclick="toggleForm('addcode-{{ key }}')">+ code</button>
+            <button class="link-btn" onclick="toggleForm('addvariant-{{ key }}')">+ variant</button>
+          </div>
+          <div class="inline-form" id="addcode-{{ key }}">
+            <input type="number" id="addcode-code-{{ key }}" min="100" max="599" placeholder="Status code e.g. 403">
+            <textarea id="addcode-body-{{ key }}" rows="4" spellcheck="false">{}</textarea>
+            <button class="code-btn" onclick="addCodeForm('{{ key }}')">Add code</button>
+          </div>
+          <div class="inline-form" id="addvariant-{{ key }}">
+            <input id="addvariant-name-{{ key }}" placeholder="Variant name e.g. maintenance">
+            <textarea id="addvariant-body-{{ key }}" rows="4" spellcheck="false">{}</textarea>
+            <button class="code-btn" onclick="addVariantForm('{{ key }}')">Add variant</button>
+          </div>
+          <div class="inline-form" id="editep-{{ key }}">
+            <select id="editep-method-{{ key }}">
+              <option>GET</option><option>POST</option><option>PUT</option>
+              <option>PATCH</option><option>DELETE</option>
+            </select>
+            <input id="editep-path-{{ key }}">
+            <select id="editep-category-{{ key }}">
+              {% for cat in grouped_endpoints.keys() %}<option>{{ cat }}</option>{% endfor %}
+            </select>
+            <button class="code-btn" onclick="submitEndpointEdit('{{ key }}')">Save changes</button>
+          </div>
+          <div class="variants" data-variants='{{ variants_by_key[key] | tojson }}'>
+            <!-- populated by renderVariants() in JS -->
+          </div>
+          <div class="body-editor">
+            <button class="link-btn" onclick="toggleEditor('{{ key }}')">Edit body</button>
+            <div class="editor-panel" id="editor-{{ key }}" style="display:none;">
+              <textarea id="editor-text-{{ key }}" rows="8" spellcheck="false"></textarea>
+              <div class="editor-actions">
+                <button class="code-btn" onclick="saveBody('{{ key }}')">Save</button>
+                <button class="code-btn" onclick="resetBody('{{ key }}')">Reset to default</button>
+                <button class="code-btn" onclick="saveAsVariantDefault('{{ key }}')">Save as variant default</button>
+              </div>
+            </div>
+          </div>
+          <div class="network-controls">
+            <button class="link-btn" onclick="toggleNetwork('{{ key }}')">Network sim</button>
+            <div class="network-panel" id="network-{{ key }}" style="display:none;">
+              <label>Delay:
+                <select id="delay-mode-{{ key }}" onchange="renderDelayInputs('{{ key }}')">
+                  <option value="none">None</option>
+                  <option value="fixed">Fixed</option>
+                  <option value="random">Random range</option>
+                </select>
+              </label>
+              <span id="delay-inputs-{{ key }}"></span>
+              <label><input type="checkbox" id="drop-{{ key }}"> Drop connection</label>
+              <label>Flaky 1 in
+                <input type="number" id="flaky-n-{{ key }}" min="2" style="width:48px;">
+                <select id="flaky-mode-{{ key }}">
+                  <option value="500">→ 500</option>
+                  <option value="drop">→ drop</option>
+                </select>
+              </label>
+              <button class="code-btn" onclick="saveNetwork('{{ key }}')">Apply</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    {% endfor %}
+  </div>
+
+  <script>
+    // ---- Endpoint state mutations (unchanged API calls) ----
+
+    function setCode(key, code, btnEl) {
+      fetch('/admin/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, code })
+      })
+      .then(r => r.json())
+      .then(() => {
+        const card = btnEl.closest('.card');
+        card.querySelectorAll('.code-btn').forEach(b => b.classList.remove('active'));
+        btnEl.classList.add('active');
+        renderVariants(card, 'normal');
+        // setCode resets active_variant to "normal" and clears any custom
+        // body server-side (see Store.set_code) -- keep the header badge
+        // in sync so it never shows stale code/variant info.
+        updateBadge(card, code, 'normal');
+        clearCustomBadge(card);
+        showToast(`${key} → ${code}`);
+      })
+      .catch(() => showToast('Failed to update'));
+    }
+
+    // Badges render twice: on the card (detail pane) and on the compact
+    // endpoint-list row. Every badge helper updates both so the list never
+    // shows stale state while the card is being edited.
+    function badgeTargets(card) {
+      const key = card.dataset.key;
+      const row = document.querySelector(`.ep-row[data-key="${key}"]`);
+      return row ? [card, row] : [card];
+    }
+
+    function codeBucket(code) {
+      const c = Number(code);
+      return c < 400 ? 'b2xx' : (c >= 500 ? 'b5xx' : 'b4xx');
+    }
+
+    function updateBadge(card, code, variant) {
+      badgeTargets(card).forEach(t => {
+        const badge = t.querySelector('.code-badge');
+        if (!badge) return;
+        badge.textContent = `${code}/${variant}`;
+        badge.className = `badge code-badge ${codeBucket(code)}`;
+      });
+    }
+
+    function clearCustomBadge(card) {
+      badgeTargets(card).forEach(t => {
+        const badge = t.querySelector('.custom-badge');
+        if (badge) badge.remove();
+      });
+    }
+
+    function showCustomBadge(card) {
+      badgeTargets(card).forEach(t => {
+        if (t.querySelector('.custom-badge')) return;
+        const badge = document.createElement('span');
+        badge.className = 'badge custom-badge';
+        badge.textContent = t.classList.contains('ep-row') ? 'custom' : 'custom body';
+        t.querySelector('.code-badge').insertAdjacentElement('afterend', badge);
+      });
+    }
+
+    function updateNetBadge(card, net) {
+      const active = !!(net.delay || net.drop || net.flaky);
+      badgeTargets(card).forEach(t => {
+        let badge = t.querySelector('.net-badge');
+        if (active && !badge) {
+          badge = document.createElement('span');
+          badge.className = 'badge net-badge';
+          badge.textContent = t.classList.contains('ep-row') ? '⚡' : '⚡ network sim';
+          const ref = t.querySelector('.custom-badge') || t.querySelector('.code-badge');
+          ref.insertAdjacentElement('afterend', badge);
+        } else if (!active && badge) {
+          badge.remove();
+        }
+      });
+    }
+
+    function renderVariants(card, activeVariant) {
+      const key = card.dataset.key;
+      const variantsMap = JSON.parse(card.querySelector('.variants').dataset.variants);
+      const activeCode = card.querySelector('.code-btn.active')?.dataset.code;
+      const variants = variantsMap[activeCode] || ['normal'];
+      const container = card.querySelector('.variants');
+      container.innerHTML = '';
+      variants.forEach(v => {
+        const btn = document.createElement('button');
+        btn.className = 'variant-btn' + (v === activeVariant ? ' active' : '');
+        btn.textContent = v;
+        btn.onclick = () => setVariant(key, v, btn);
+        const x = document.createElement('span');
+        x.className = 'chip-x';
+        x.textContent = '×';
+        x.onclick = (ev) => { ev.stopPropagation(); deleteVariant(key, v); };
+        btn.appendChild(x);
+        container.appendChild(btn);
+      });
+    }
+
+    function setVariant(key, variant, btnEl) {
+      fetch('/admin/set_variant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, variant })
+      })
+      .then(r => r.json())
+      .then(() => {
+        btnEl.closest('.variants').querySelectorAll('.variant-btn').forEach(b => b.classList.remove('active'));
+        btnEl.classList.add('active');
+        const card = btnEl.closest('.card');
+        const activeCode = card.querySelector('.code-btn.active')?.dataset.code;
+        // setVariant clears any custom body server-side (see
+        // Store.set_variant) -- keep the header badge in sync.
+        updateBadge(card, activeCode, variant);
+        clearCustomBadge(card);
+        showToast(`${key} variant → ${variant}`);
+      })
+      .catch(() => showToast('Failed to update variant'));
+    }
+
+    function toggleEditor(key) {
+      const panel = document.getElementById('editor-' + key);
+      const isHidden = panel.style.display === 'none';
+      panel.style.display = isHidden ? 'block' : 'none';
+      if (isHidden) {
+        fetch('/admin/body/' + key)
+          .then(r => r.json())
+          .then(d => {
+            document.getElementById('editor-text-' + key).value = JSON.stringify(d.body, null, 2);
+          });
+      }
+    }
+
+    function saveBody(key) {
+      const text = document.getElementById('editor-text-' + key).value;
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        showToast('Invalid JSON: ' + e.message);
+        return;
+      }
+      fetch('/admin/set_body', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, body: parsed })
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { showToast(d.error); return; }
+        // A custom body doesn't change active_code/active_variant, so the
+        // code/variant badge stays as-is -- but the badge must not lie
+        // about a custom body being served, so surface a small indicator.
+        const card = document.querySelector(`.card[data-key="${key}"]`);
+        if (card) showCustomBadge(card);
+        showToast(`${key} body saved`);
+      });
+    }
+
+    function resetBody(key) {
+      fetch('/admin/reset_body', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key })
+      })
+      .then(r => r.json())
+      .then(() => {
+        toggleEditor(key); // close
+        toggleEditor(key); // reopen with fresh body
+        const card = document.querySelector(`.card[data-key="${key}"]`);
+        if (card) clearCustomBadge(card);
+        showToast(`${key} body reset`);
+      });
+    }
+
+    function toggleNetwork(key) {
+      const panel = document.getElementById('network-' + key);
+      panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    }
+
+    // ---- Miller-column navigation ----
+
+    const SELECTION_KEY = 'mockServerSelection';
+    let selectedCategory = null;
+    let selectedKey = null;
+
+    function loadSelection() {
+      try {
+        return JSON.parse(localStorage.getItem(SELECTION_KEY) || '{}');
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function saveSelection() {
+      localStorage.setItem(SELECTION_KEY, JSON.stringify({ category: selectedCategory, key: selectedKey }));
+    }
+
+    function setPane(pane) {
+      document.getElementById('columns').dataset.pane = pane;
+    }
+
+    function selectCategory(category, opts = {}) {
+      selectedCategory = category;
+      document.querySelectorAll('.cat-row').forEach(row => {
+        row.classList.toggle('active', row.dataset.category === category);
+      });
+      document.getElementById('eps-title').textContent = category;
+      // Picking a category is an explicit "show me this bucket" -- drop any
+      // cross-category search filter so the bucket shows in full.
+      const search = document.getElementById('search');
+      if (search.value && !opts.keepSearch) search.value = '';
+      applyEndpointFilter();
+      // Deselect an endpoint from another category; keep it if it belongs here.
+      if (selectedKey) {
+        const row = document.querySelector(`.ep-row[data-key="${selectedKey}"]`);
+        if (!row || row.dataset.category !== category) clearDetail();
+      }
+      saveSelection();
+      if (!opts.silent) setPane('eps');
+    }
+
+    function selectEndpoint(key, opts = {}) {
+      const row = document.querySelector(`.ep-row[data-key="${key}"]`);
+      if (!row) return;
+      // A search hit can live outside the selected category -- adopt its
+      // category so clearing the search keeps the context consistent.
+      if (row.dataset.category !== selectedCategory) {
+        selectCategory(row.dataset.category, { keepSearch: true, silent: true });
+      }
+      selectedKey = key;
+      document.querySelectorAll('.ep-row').forEach(r => r.classList.toggle('active', r === row));
+
+      const host = document.getElementById('detail-host');
+      const current = host.querySelector('.card');
+      const store = document.getElementById('card-store');
+      if (current && current.dataset.key !== key) store.appendChild(current);
+      if (!host.querySelector('.card')) {
+        host.appendChild(document.querySelector(`.card[data-key="${key}"]`));
+      }
+      document.getElementById('detail-empty').style.display = 'none';
+      document.getElementById('detail-title').textContent = row.querySelector('.label').textContent;
+      saveSelection();
+      if (!opts.silent) setPane('detail');
+    }
+
+    function clearDetail() {
+      const host = document.getElementById('detail-host');
+      const current = host.querySelector('.card');
+      if (current) document.getElementById('card-store').appendChild(current);
+      selectedKey = null;
+      document.querySelectorAll('.ep-row').forEach(r => r.classList.remove('active'));
+      document.getElementById('detail-empty').style.display = 'block';
+      document.getElementById('detail-title').textContent = 'Endpoint';
+    }
+
+    // With no search: show the selected category's endpoints. With a search:
+    // show matches from ALL categories (Finder-style global find), and update
+    // each category row's count to its match count.
+    function applyEndpointFilter() {
+      const q = document.getElementById('search').value.toLowerCase();
+      const matchCounts = {};
+      let visibleTotal = 0;
+      document.querySelectorAll('.ep-row').forEach(row => {
+        const cat = row.dataset.category;
+        let visible;
+        if (q) {
+          visible = row.textContent.toLowerCase().includes(q);
+          if (visible) matchCounts[cat] = (matchCounts[cat] || 0) + 1;
+        } else {
+          visible = cat === selectedCategory;
+        }
+        row.classList.toggle('visible', visible);
+        if (visible) visibleTotal++;
+      });
+      document.querySelectorAll('.cat-row').forEach(row => {
+        const cat = row.dataset.category;
+        const count = q ? (matchCounts[cat] || 0) : Number(row.dataset.count);
+        row.querySelector('.count').textContent = count;
+        row.classList.toggle('dimmed', q.length > 0 && count === 0);
+      });
+      document.getElementById('eps-empty').style.display = visibleTotal === 0 ? 'block' : 'none';
+      document.getElementById('eps-title').textContent = q ? 'Search results' : (selectedCategory || 'Endpoints');
+    }
+
+    function filterCards() {
+      applyEndpointFilter();
+    }
+
+    function resetAll() {
+      if (!confirm('Reset every endpoint to its default response?')) return;
+      fetch('/admin/reset_all', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => {
+          showToast('All endpoints reset');
+          setTimeout(() => location.reload(), 400);
+        });
+    }
+
+    function renderDelayInputs(key) {
+      const mode = document.getElementById('delay-mode-' + key).value;
+      const el = document.getElementById('delay-inputs-' + key);
+      if (mode === 'fixed') {
+        el.innerHTML = '<input type="number" id="delay-seconds-' + key + '" style="width:48px;"> s';
+      } else if (mode === 'random') {
+        el.innerHTML = '<input type="number" id="delay-min-' + key + '" style="width:44px;"> - <input type="number" id="delay-max-' + key + '" style="width:44px;"> s';
+      } else {
+        el.innerHTML = '';
+      }
+    }
+
+    function saveNetwork(key) {
+      const mode = document.getElementById('delay-mode-' + key).value;
+      let delay = null;
+      if (mode === 'fixed') {
+        delay = { mode: 'fixed', seconds: Number(document.getElementById('delay-seconds-' + key).value) };
+      } else if (mode === 'random') {
+        delay = {
+          mode: 'random',
+          min: Number(document.getElementById('delay-min-' + key).value),
+          max: Number(document.getElementById('delay-max-' + key).value),
+        };
+      }
+      const drop = document.getElementById('drop-' + key).checked;
+      const n = Number(document.getElementById('flaky-n-' + key).value);
+      const flaky = n >= 2 ? { one_in_n: n, mode: document.getElementById('flaky-mode-' + key).value } : null;
+
+      fetch('/admin/set_network', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, delay, drop, flaky })
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { showToast(d.error); return; }
+        const card = document.querySelector(`.card[data-key="${key}"]`);
+        if (card) {
+          const net = { delay, drop, flaky };
+          card.dataset.network = JSON.stringify(net);
+          updateNetBadge(card, net);
+        }
+        showToast(`${key} network sim updated`);
+      });
+    }
+
+    // Populate the network-sim panel's inputs from the card's persisted
+    // `data-network` state (set server-side from store state). Without
+    // this, the panel always renders blank regardless of what's actually
+    // active, and clicking "Apply" without re-entering values would
+    // silently wipe the real persisted config.
+    function hydrateNetworkPanel(card) {
+      const key = card.dataset.key;
+      let net;
+      try {
+        net = JSON.parse(card.dataset.network || '{}');
+      } catch (e) {
+        net = {};
+      }
+      const delay = net.delay || null;
+      const drop = !!net.drop;
+      const flaky = net.flaky || null;
+
+      const modeSelect = document.getElementById('delay-mode-' + key);
+      modeSelect.value = delay ? delay.mode : 'none';
+      renderDelayInputs(key);
+      if (delay && delay.mode === 'fixed') {
+        document.getElementById('delay-seconds-' + key).value = delay.seconds;
+      } else if (delay && delay.mode === 'random') {
+        document.getElementById('delay-min-' + key).value = delay.min;
+        document.getElementById('delay-max-' + key).value = delay.max;
+      }
+
+      document.getElementById('drop-' + key).checked = drop;
+
+      if (flaky) {
+        document.getElementById('flaky-n-' + key).value = flaky.one_in_n;
+        document.getElementById('flaky-mode-' + key).value = flaky.mode;
+      }
+    }
+
+    // ---- Request log (bottom panel) ----
+
+    const LOG_OPEN_KEY = 'mockServerLogOpen';
+    let logPolling = null;
+
+    function setLogOpen(open) {
+      const panel = document.getElementById('log-panel');
+      panel.classList.toggle('open', open);
+      document.getElementById('log-hint').textContent = open ? '(click to collapse)' : '(click to expand)';
+      if (open) {
+        refreshLog();
+        logPolling = setInterval(refreshLog, 2000);
+      } else {
+        clearInterval(logPolling);
+      }
+      localStorage.setItem(LOG_OPEN_KEY, open ? '1' : '0');
+    }
+
+    function toggleLog() {
+      setLogOpen(!document.getElementById('log-panel').classList.contains('open'));
+    }
+
+    function refreshLog() {
+      fetch('/admin/log')
+        .then(r => r.json())
+        .then(entries => {
+          const body = document.getElementById('log-body');
+          if (!entries.length) {
+            const empty = document.createElement('div');
+            empty.className = 'log-empty';
+            empty.textContent = 'No requests yet — hit any mocked endpoint to see it here.';
+            body.replaceChildren(empty);
+            return;
+          }
+          const nodes = entries.map(buildLogEntryNode);
+          body.replaceChildren(...nodes);
+        });
+    }
+
+    function buildLogEntryNode(e) {
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+
+      const topRow = document.createElement('div');
+      topRow.className = 'top-row';
+
+      const summary = document.createElement('span');
+      summary.textContent = `${e.method} ${e.path} → `;
+      const codeSpan = document.createElement('span');
+      codeSpan.className = 'log-code ' + codeBucket(e.served_code);
+      codeSpan.textContent = `${e.served_code} (${e.served_variant})`;
+      summary.appendChild(codeSpan);
+      topRow.appendChild(summary);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'link-btn';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', () => navigator.clipboard.writeText(JSON.stringify(e)));
+      topRow.appendChild(copyBtn);
+
+      entry.appendChild(topRow);
+
+      const headersPre = document.createElement('pre');
+      headersPre.textContent = JSON.stringify(e.headers, null, 2);
+      entry.appendChild(headersPre);
+
+      if (e.body) {
+        const bodyPre = document.createElement('pre');
+        bodyPre.textContent = JSON.stringify(e.body, null, 2);
+        entry.appendChild(bodyPre);
+      }
+
+      return entry;
+    }
+
+    // ---- Definition CRUD ----
+
+    function defsRequest(url, method, payload, onOk) {
+      fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(r => r.json().then(d => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { showToast(d.error || 'Request failed'); return; }
+        if (onOk) onOk(d);
+        showToast('Saved — reloading');
+        setTimeout(() => location.reload(), 400);
+      })
+      .catch(() => showToast('Request failed'));
+    }
+
+    function toggleForm(id) {
+      document.getElementById(id).classList.toggle('open');
+    }
+
+    function readJsonInput(id) {
+      try {
+        return JSON.parse(document.getElementById(id).value);
+      } catch (e) {
+        showToast('Invalid JSON: ' + e.message);
+        return null;
+      }
+    }
+
+    function addCodeForm(key) {
+      const code = Number(document.getElementById('addcode-code-' + key).value);
+      const body = readJsonInput('addcode-body-' + key);
+      if (body === null) return;
+      defsRequest('/admin/defs/response', 'POST', { key, code, body });
+    }
+
+    function addVariantForm(key) {
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      const code = Number(card.querySelector('.code-btn.active')?.dataset.code);
+      const variant = document.getElementById('addvariant-name-' + key).value.trim();
+      const body = readJsonInput('addvariant-body-' + key);
+      if (body === null) return;
+      defsRequest('/admin/defs/response', 'POST', { key, code, variant, body });
+    }
+
+    function deleteCode(key, code) {
+      if (!confirm(`Delete code ${code} (all its variants)?`)) return;
+      defsRequest('/admin/defs/response', 'DELETE', { key, code });
+    }
+
+    function deleteVariant(key, variant) {
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      const code = Number(card.querySelector('.code-btn.active')?.dataset.code);
+      if (!confirm(`Delete variant "${variant}" of ${code}?`)) return;
+      defsRequest('/admin/defs/response', 'DELETE', { key, code, variant });
+    }
+
+    function saveAsVariantDefault(key) {
+      const body = readJsonInput('editor-text-' + key);
+      if (body === null) return;
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      const code = Number(card.querySelector('.code-btn.active')?.dataset.code);
+      const variant = card.querySelector('.variant-btn.active')?.textContent.replace('×', '') || 'normal';
+      defsRequest('/admin/defs/response', 'POST', { key, code, variant, body });
+    }
+
+    function openEndpointEdit(key) {
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      const row = document.querySelector(`.ep-row[data-key="${key}"]`);
+      document.getElementById('editep-method-' + key).value =
+        row.querySelector('.method').textContent;
+      document.getElementById('editep-path-' + key).value =
+        card.querySelector('.path').textContent;
+      document.getElementById('editep-category-' + key).value = row.dataset.category;
+      toggleForm('editep-' + key);
+    }
+
+    function submitEndpointEdit(key) {
+      defsRequest('/admin/defs/endpoint', 'PATCH', {
+        key,
+        method: document.getElementById('editep-method-' + key).value,
+        path: document.getElementById('editep-path-' + key).value.trim(),
+        category: document.getElementById('editep-category-' + key).value,
+      });
+    }
+
+    function deleteEndpoint(key) {
+      if (!confirm(`Delete endpoint "${key}"? Its path stops being served.`)) return;
+      defsRequest('/admin/defs/endpoint', 'DELETE', { key });
+    }
+
+    function restoreBuiltins() {
+      if (!confirm('Restore the built-in endpoint definitions? User-added endpoints are kept.')) return;
+      defsRequest('/admin/defs/restore_builtins', 'POST', {});
+    }
+
+    function importDefinitions(input) {
+      const file = input.files[0];
+      if (!file) return;
+      file.text().then(text => {
+        let data;
+        try { data = JSON.parse(text); } catch (e) { showToast('Invalid JSON file'); return; }
+        const replace = confirm('OK = REPLACE everything with this file.\nCancel = MERGE it into the current set.');
+        defsRequest('/admin/import', 'POST', { mode: replace ? 'replace' : 'merge', data });
+      });
+      input.value = '';
+    }
+
+    function openCategoryForm(mode, row) {
+      const form = document.getElementById('add-category-form');
+      document.getElementById('cat-form-mode').value = mode;
+      document.getElementById('cat-form-original').value = row ? row.dataset.category : '';
+      document.getElementById('cat-form-name').value = row ? row.dataset.category : '';
+      document.getElementById('cat-form-icon').value = row ? row.dataset.icon : '';
+      document.getElementById('cat-form-color').value = row ? row.dataset.color : '#5b8cff';
+      form.classList.add('open');
+      document.getElementById('cat-form-name').focus();
+    }
+
+    function submitCategoryForm(event) {
+      event.preventDefault();
+      const mode = document.getElementById('cat-form-mode').value;
+      const name = document.getElementById('cat-form-name').value.trim();
+      const icon = document.getElementById('cat-form-icon').value.trim();
+      const color = document.getElementById('cat-form-color').value;
+      if (mode === 'add') {
+        defsRequest('/admin/defs/category', 'POST', { name, icon, color });
+      } else {
+        const original = document.getElementById('cat-form-original').value;
+        defsRequest('/admin/defs/category', 'PATCH',
+                    { name: original, new_name: name, icon, color });
+      }
+      return false;
+    }
+
+    function deleteCategory(name) {
+      if (!confirm(`Delete category "${name}"?`)) return;
+      fetch('/admin/defs/category', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      })
+      .then(r => r.json().then(d => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (ok) {
+          showToast('Category deleted — reloading');
+          setTimeout(() => location.reload(), 400);
+          return;
+        }
+        // Non-empty category: server said pass cascade -- confirm the
+        // destructive version explicitly before retrying.
+        if ((d.error || '').includes('cascade') &&
+            confirm(`"${name}" still has endpoints. Delete them too?`)) {
+          defsRequest('/admin/defs/category', 'DELETE', { name, cascade: true });
+        } else {
+          showToast(d.error || 'Delete failed');
+        }
+      });
+    }
+
+    function openEndpointForm() {
+      if (!selectedCategory) { showToast('Select a category first'); return; }
+      document.getElementById('add-endpoint-form').classList.add('open');
+      document.getElementById('ep-form-path').focus();
+    }
+
+    function submitEndpointForm(event) {
+      event.preventDefault();
+      let body;
+      try {
+        body = JSON.parse(document.getElementById('ep-form-body').value);
+      } catch (e) {
+        showToast('Invalid JSON body: ' + e.message);
+        return false;
+      }
+      defsRequest('/admin/defs/endpoint', 'POST', {
+        category: selectedCategory,
+        method: document.getElementById('ep-form-method').value,
+        path: document.getElementById('ep-form-path').value.trim(),
+        body,
+      }, d => {
+        // Select the new endpoint after the reload.
+        localStorage.setItem(SELECTION_KEY,
+                             JSON.stringify({ category: selectedCategory, key: d.key }));
+      });
+      return false;
+    }
+
+    // ---- Scenarios ----
+
+    function loadScenarios() {
+      fetch('/admin/scenarios')
+        .then(r => r.json())
+        .then(scenarios => {
+          const bar = document.getElementById('scenario-bar');
+          bar.replaceChildren();
+          Object.entries(scenarios).forEach(([name, meta]) => {
+            const btn = document.createElement('button');
+            btn.className = 'scenario-btn' + (meta.builtin ? ' builtin' : '');
+            btn.textContent = name;
+            btn.onclick = () => applyScenario(name);
+            bar.appendChild(btn);
+          });
+          const saveBtn = document.createElement('button');
+          saveBtn.className = 'scenario-btn save-new';
+          saveBtn.textContent = '+ Save current as...';
+          saveBtn.onclick = saveCurrentScenario;
+          bar.appendChild(saveBtn);
+        });
+    }
+
+    function applyScenario(name) {
+      fetch('/admin/scenario/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      })
+      .then(r => r.json())
+      .then(() => {
+        showToast(`Scenario "${name}" applied — reloading`);
+        setTimeout(() => location.reload(), 600);
+      });
+    }
+
+    function saveCurrentScenario() {
+      const name = prompt('Name this scenario:');
+      if (!name) return;
+      fetch('/admin/scenario/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      })
+      .then(r => r.json())
+      .then(() => {
+        showToast(`Scenario "${name}" saved`);
+        loadScenarios();
+      });
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+    }
+
+    // ---- Init ----
+
+    document.querySelectorAll('.card').forEach(card => {
+      renderVariants(card, card.dataset.activeVariant || 'normal');
+      hydrateNetworkPanel(card);
+    });
+
+    (function init() {
+      const saved = loadSelection();
+      const catRows = [...document.querySelectorAll('.cat-row')];
+      const validCat = catRows.some(r => r.dataset.category === saved.category)
+        ? saved.category
+        : catRows[0]?.dataset.category;
+      if (validCat) selectCategory(validCat, { silent: true });
+      if (saved.key && document.querySelector(`.ep-row[data-key="${saved.key}"]`)) {
+        selectEndpoint(saved.key, { silent: true });
+      }
+      if (localStorage.getItem(LOG_OPEN_KEY) === '1') setLogOpen(true);
+      loadScenarios();
+    })();
+  </script>
+</body>
+</html>
