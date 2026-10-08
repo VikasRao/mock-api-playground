@@ -755,8 +755,24 @@
       }
     }
 
+    // The selection lives in the URL hash (per tab, so other tabs can't
+    // overwrite it, and it survives reloads) and in localStorage (used
+    // only for fresh visits with no hash).
+    function storeSelection(category, key) {
+      localStorage.setItem(SELECTION_KEY, JSON.stringify({ category, key }));
+      const params = new URLSearchParams();
+      if (category) params.set('cat', category);
+      if (key) params.set('ep', key);
+      history.replaceState(null, '', '#' + params.toString());
+    }
+
     function saveSelection() {
-      localStorage.setItem(SELECTION_KEY, JSON.stringify({ category: selectedCategory, key: selectedKey }));
+      storeSelection(selectedCategory, selectedKey);
+    }
+
+    function readHashSelection() {
+      const params = new URLSearchParams(location.hash.slice(1));
+      return { category: params.get('cat'), key: params.get('ep') };
     }
 
     function setPane(pane) {
@@ -1074,12 +1090,13 @@
     }
 
     function submitEndpointEdit(key) {
+      const category = document.getElementById('editep-category-' + key).value;
       defsRequest('/admin/defs/endpoint', 'PATCH', {
         key,
         method: document.getElementById('editep-method-' + key).value,
         path: document.getElementById('editep-path-' + key).value.trim(),
-        category: document.getElementById('editep-category-' + key).value,
-      });
+        category,
+      }, () => storeSelection(category, key));
     }
 
     function deleteEndpoint(key) {
@@ -1122,11 +1139,15 @@
       const icon = document.getElementById('cat-form-icon').value.trim();
       const color = document.getElementById('cat-form-color').value;
       if (mode === 'add') {
-        defsRequest('/admin/defs/category', 'POST', { name, icon, color });
+        defsRequest('/admin/defs/category', 'POST', { name, icon, color },
+                    () => storeSelection(name, null));
       } else {
         const original = document.getElementById('cat-form-original').value;
         defsRequest('/admin/defs/category', 'PATCH',
-                    { name: original, new_name: name, icon, color });
+                    { name: original, new_name: name, icon, color },
+                    () => {
+                      if (original === selectedCategory) storeSelection(name, selectedKey);
+                    });
       }
       return false;
     }
@@ -1170,11 +1191,7 @@
         method: document.getElementById('ep-form-method').value,
         path: document.getElementById('ep-form-path').value.trim(),
         body,
-      }, d => {
-        // Select the new endpoint after the reload.
-        localStorage.setItem(SELECTION_KEY,
-                             JSON.stringify({ category: selectedCategory, key: d.key }));
-      });
+      }, d => storeSelection(selectedCategory, d.key));  // select the new endpoint after reload
       return false;
     }
 
@@ -1232,14 +1249,17 @@
     });
 
     (function init() {
-      const saved = loadSelection();
+      const fromHash = readHashSelection();
+      const saved = fromHash.category ? fromHash : loadSelection();
       const catRows = [...document.querySelectorAll('.cat-row')];
       const validCat = catRows.some(r => r.dataset.category === saved.category)
         ? saved.category
         : catRows[0]?.dataset.category;
       if (validCat) selectCategory(validCat, { silent: true });
+      // Not silent: on narrow screens a restored endpoint opens its detail
+      // pane instead of dropping the user back on the category list.
       if (saved.key && document.querySelector(`.ep-row[data-key="${saved.key}"]`)) {
-        selectEndpoint(saved.key, { silent: true });
+        selectEndpoint(saved.key);
       }
       if (localStorage.getItem(LOG_OPEN_KEY) === '1') setLogOpen(true);
       loadScenarios();
