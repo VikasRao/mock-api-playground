@@ -251,6 +251,28 @@
   .code-btn:hover .chip-x, .variant-btn:hover .chip-x { opacity: .85; }
   .chip-x:hover { background: rgba(255,80,80,.35); opacity: 1 !important; }
 
+  /* ---- Progress: per-control spinner, pending pill, reload overlay ---- */
+  .code-btn:disabled, .variant-btn:disabled { cursor: progress; }
+  .is-busy { opacity: .6; }
+  .is-busy::after {
+    content: ""; display: inline-block; width: 9px; height: 9px; margin-left: 6px;
+    border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .busy-pill {
+    position: fixed; top: 12px; right: 16px; z-index: 20; display: none;
+    background: var(--card); border: 1px solid var(--accent); color: var(--accent);
+    padding: 4px 12px; border-radius: 999px; font-size: 12px;
+  }
+  .busy-pill.show { display: block; }
+  .busy-overlay {
+    position: fixed; inset: 0; z-index: 30; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(15, 17, 21, .6); font-size: 14px;
+  }
+  .busy-overlay.show { display: flex; }
+
   /* ---- Mobile: drill-in, one pane at a time ---- */
   @media (max-width: 900px) {
     .col { display: none; width: 100%; border-right: none; }
@@ -367,6 +389,8 @@
   </div>
 
   <div class="toast" id="toast"></div>
+  <div class="busy-pill" id="busy-pill"></div>
+  <div class="busy-overlay" id="busy-overlay"><span>Saving…</span></div>
 
   <!-- Every endpoint's full card lives here; selecting an endpoint moves its
        node into #detail-host. The card DOM (data-key, badges, .variants) is
@@ -439,8 +463,8 @@
             <div class="editor-panel" id="editor-{{ key }}" style="display:none;">
               <textarea id="editor-text-{{ key }}" rows="8" spellcheck="false"></textarea>
               <div class="editor-actions">
-                <button class="code-btn" onclick="saveBody('{{ key }}')">Save</button>
-                <button class="code-btn" onclick="resetBody('{{ key }}')">Reset to default</button>
+                <button class="code-btn" onclick="saveBody('{{ key }}', this)">Save</button>
+                <button class="code-btn" onclick="resetBody('{{ key }}', this)">Reset to default</button>
                 <button class="code-btn" onclick="saveAsVariantDefault('{{ key }}')">Save as variant default</button>
               </div>
             </div>
@@ -464,7 +488,7 @@
                   <option value="drop">→ drop</option>
                 </select>
               </label>
-              <button class="code-btn" onclick="saveNetwork('{{ key }}')">Apply</button>
+              <button class="code-btn" onclick="saveNetwork('{{ key }}', this)">Apply</button>
             </div>
           </div>
         </div>
@@ -474,28 +498,102 @@
   </div>
 
   <script>
-    // ---- Endpoint state mutations (unchanged API calls) ----
+    // ---- Requests, progress and errors ----
+
+    // Every admin call goes through api(): it rejects on HTTP or network
+    // errors with the server's message (toasted unless quiet), so callers
+    // update the UI only in their success path and never report a failed
+    // save as done.
+    function api(url, { method = 'GET', body, quiet = false } = {}) {
+      const opts = { method, headers: {} };
+      if (body !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      return fetch(url, opts)
+        .catch(() => { throw new Error('Network error — is the server running?'); })
+        .then(r => r.json().catch(() => ({})).then(d => {
+          if (!r.ok) throw new Error(d.error || `Request failed (${r.status})`);
+          return d;
+        }))
+        .catch(err => {
+          if (!quiet) showToast(err.message);
+          throw err;
+        });
+    }
+
+    // Errors are already toasted by api(); use as the final .catch().
+    const ignore = () => {};
+
+    let pendingCount = 0;
+    let pillTimer = null;
+
+    // Shows the top-right pill only for requests still running after
+    // 300 ms, so fast calls don't flicker.
+    function trackPending(promise, label) {
+      pendingCount++;
+      if (pendingCount === 1) {
+        pillTimer = setTimeout(() => {
+          const pill = document.getElementById('busy-pill');
+          pill.textContent = label;
+          pill.classList.add('show');
+        }, 300);
+      }
+      return promise.finally(() => {
+        pendingCount--;
+        if (pendingCount === 0) {
+          clearTimeout(pillTimer);
+          document.getElementById('busy-pill').classList.remove('show');
+        }
+      });
+    }
+
+    // Disables every element in `els` and spins the first until the request
+    // settles. Chip groups pass all their chips, so a second click can't
+    // race the first.
+    function withBusy(els, promise, label = 'Saving…') {
+      const list = Array.isArray(els) ? els : [els];
+      list.forEach(el => { el.disabled = true; });
+      list[0]?.classList.add('is-busy');
+      return trackPending(promise, label).finally(() => {
+        list.forEach(el => { el.disabled = false; });
+        list[0]?.classList.remove('is-busy');
+      });
+    }
+
+    // Definition edits reload the page; the overlay covers the request and
+    // the reload, and closes again if the request fails.
+    function saveThenReload(promise, onOk) {
+      const overlay = document.getElementById('busy-overlay');
+      overlay.classList.add('show');
+      return promise
+        .then(d => { if (onOk) onOk(d); location.reload(); })
+        .catch(() => overlay.classList.remove('show'));
+    }
+
+    // Reflect a server-confirmed selection ({code, variant, body, is_custom})
+    // in the card's chips, both badge sets and the body editor.
+    function applySelection(card, sel) {
+      card.querySelectorAll('.code-btn').forEach(b =>
+        b.classList.toggle('active', Number(b.dataset.code) === sel.code));
+      renderVariants(card, sel.variant);
+      updateBadge(card, sel.code, sel.variant);
+      if (sel.is_custom) showCustomBadge(card); else clearCustomBadge(card);
+      document.getElementById('editor-text-' + card.dataset.key).value =
+        JSON.stringify(sel.body, null, 2);
+    }
+
+    // ---- Endpoint state mutations ----
 
     function setCode(key, code, btnEl) {
-      fetch('/admin/set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, code })
-      })
-      .then(r => r.json())
-      .then(() => {
-        const card = btnEl.closest('.card');
-        card.querySelectorAll('.code-btn').forEach(b => b.classList.remove('active'));
-        btnEl.classList.add('active');
-        renderVariants(card, 'normal');
-        // setCode resets active_variant to "normal" and clears any custom
-        // body server-side (see Store.set_code) -- keep the header badge
-        // in sync so it never shows stale code/variant info.
-        updateBadge(card, code, 'normal');
-        clearCustomBadge(card);
-        showToast(`${key} → ${code}`);
-      })
-      .catch(() => showToast('Failed to update'));
+      const card = btnEl.closest('.card');
+      const chips = [btnEl, ...card.querySelectorAll('.code-btn, .variant-btn')];
+      withBusy(chips, api('/admin/set', { method: 'POST', body: { key, code } }), 'Loading…')
+        .then(sel => {
+          applySelection(card, sel);
+          showToast(`${key} → ${code}`);
+        })
+        .catch(ignore);
     }
 
     // Badges render twice: on the card (detail pane) and on the compact
@@ -576,24 +674,14 @@
     }
 
     function setVariant(key, variant, btnEl) {
-      fetch('/admin/set_variant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, variant })
-      })
-      .then(r => r.json())
-      .then(() => {
-        btnEl.closest('.variants').querySelectorAll('.variant-btn').forEach(b => b.classList.remove('active'));
-        btnEl.classList.add('active');
-        const card = btnEl.closest('.card');
-        const activeCode = card.querySelector('.code-btn.active')?.dataset.code;
-        // setVariant clears any custom body server-side (see
-        // Store.set_variant) -- keep the header badge in sync.
-        updateBadge(card, activeCode, variant);
-        clearCustomBadge(card);
-        showToast(`${key} variant → ${variant}`);
-      })
-      .catch(() => showToast('Failed to update variant'));
+      const card = btnEl.closest('.card');
+      const chips = [btnEl, ...card.querySelectorAll('.code-btn, .variant-btn')];
+      withBusy(chips, api('/admin/set_variant', { method: 'POST', body: { key, variant } }), 'Loading…')
+        .then(sel => {
+          applySelection(card, sel);
+          showToast(`${key} variant → ${variant}`);
+        })
+        .catch(ignore);
     }
 
     function toggleEditor(key) {
@@ -601,54 +689,33 @@
       const isHidden = panel.style.display === 'none';
       panel.style.display = isHidden ? 'block' : 'none';
       if (isHidden) {
-        fetch('/admin/body/' + key)
-          .then(r => r.json())
-          .then(d => {
-            document.getElementById('editor-text-' + key).value = JSON.stringify(d.body, null, 2);
-          });
+        const card = document.querySelector(`.card[data-key="${key}"]`);
+        trackPending(api('/admin/body/' + key), 'Loading…')
+          .then(sel => applySelection(card, sel))
+          .catch(ignore);
       }
     }
 
-    function saveBody(key) {
-      const text = document.getElementById('editor-text-' + key).value;
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        showToast('Invalid JSON: ' + e.message);
-        return;
-      }
-      fetch('/admin/set_body', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, body: parsed })
-      })
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) { showToast(d.error); return; }
-        // A custom body doesn't change active_code/active_variant, so the
-        // code/variant badge stays as-is -- but the badge must not lie
-        // about a custom body being served, so surface a small indicator.
-        const card = document.querySelector(`.card[data-key="${key}"]`);
-        if (card) showCustomBadge(card);
-        showToast(`${key} body saved`);
-      });
+    function saveBody(key, btnEl) {
+      const parsed = readJsonInput('editor-text-' + key);
+      if (parsed === null) return;
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      withBusy(btnEl, api('/admin/set_body', { method: 'POST', body: { key, body: parsed } }))
+        .then(sel => {
+          applySelection(card, sel);
+          showToast(`${key} body saved`);
+        })
+        .catch(ignore);
     }
 
-    function resetBody(key) {
-      fetch('/admin/reset_body', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key })
-      })
-      .then(r => r.json())
-      .then(() => {
-        toggleEditor(key); // close
-        toggleEditor(key); // reopen with fresh body
-        const card = document.querySelector(`.card[data-key="${key}"]`);
-        if (card) clearCustomBadge(card);
-        showToast(`${key} body reset`);
-      });
+    function resetBody(key, btnEl) {
+      const card = document.querySelector(`.card[data-key="${key}"]`);
+      withBusy(btnEl, api('/admin/reset_body', { method: 'POST', body: { key } }))
+        .then(sel => {
+          applySelection(card, sel);
+          showToast(`${key} body reset`);
+        })
+        .catch(ignore);
     }
 
     function toggleNetwork(key) {
@@ -767,12 +834,7 @@
 
     function resetAll() {
       if (!confirm('Reset every endpoint to its default response?')) return;
-      fetch('/admin/reset_all', { method: 'POST' })
-        .then(r => r.json())
-        .then(() => {
-          showToast('All endpoints reset');
-          setTimeout(() => location.reload(), 400);
-        });
+      saveThenReload(api('/admin/reset_all', { method: 'POST' }));
     }
 
     function renderDelayInputs(key) {
@@ -787,7 +849,7 @@
       }
     }
 
-    function saveNetwork(key) {
+    function saveNetwork(key, btnEl) {
       const mode = document.getElementById('delay-mode-' + key).value;
       let delay = null;
       if (mode === 'fixed') {
@@ -803,22 +865,17 @@
       const n = Number(document.getElementById('flaky-n-' + key).value);
       const flaky = n >= 2 ? { one_in_n: n, mode: document.getElementById('flaky-mode-' + key).value } : null;
 
-      fetch('/admin/set_network', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, delay, drop, flaky })
-      })
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) { showToast(d.error); return; }
-        const card = document.querySelector(`.card[data-key="${key}"]`);
-        if (card) {
-          const net = { delay, drop, flaky };
-          card.dataset.network = JSON.stringify(net);
-          updateNetBadge(card, net);
-        }
-        showToast(`${key} network sim updated`);
-      });
+      withBusy(btnEl, api('/admin/set_network', { method: 'POST', body: { key, delay, drop, flaky } }))
+        .then(() => {
+          const card = document.querySelector(`.card[data-key="${key}"]`);
+          if (card) {
+            const net = { delay, drop, flaky };
+            card.dataset.network = JSON.stringify(net);
+            updateNetBadge(card, net);
+          }
+          showToast(`${key} network sim updated`);
+        })
+        .catch(ignore);
     }
 
     // Populate the network-sim panel's inputs from the card's persisted
@@ -934,19 +991,7 @@
     // ---- Definition CRUD ----
 
     function defsRequest(url, method, payload, onOk) {
-      fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(r => r.json().then(d => ({ ok: r.ok, d })))
-      .then(({ ok, d }) => {
-        if (!ok) { showToast(d.error || 'Request failed'); return; }
-        if (onOk) onOk(d);
-        showToast('Saved — reloading');
-        setTimeout(() => location.reload(), 400);
-      })
-      .catch(() => showToast('Request failed'));
+      return saveThenReload(api(url, { method, body: payload }), onOk);
     }
 
     function toggleForm(id) {
@@ -1070,27 +1115,21 @@
 
     function deleteCategory(name) {
       if (!confirm(`Delete category "${name}"?`)) return;
-      fetch('/admin/defs/category', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      })
-      .then(r => r.json().then(d => ({ ok: r.ok, d })))
-      .then(({ ok, d }) => {
-        if (ok) {
-          showToast('Category deleted — reloading');
-          setTimeout(() => location.reload(), 400);
-          return;
-        }
-        // Non-empty category: server said pass cascade -- confirm the
-        // destructive version explicitly before retrying.
-        if ((d.error || '').includes('cascade') &&
-            confirm(`"${name}" still has endpoints. Delete them too?`)) {
-          defsRequest('/admin/defs/category', 'DELETE', { name, cascade: true });
-        } else {
-          showToast(d.error || 'Delete failed');
-        }
-      });
+      const overlay = document.getElementById('busy-overlay');
+      overlay.classList.add('show');
+      api('/admin/defs/category', { method: 'DELETE', body: { name }, quiet: true })
+        .then(() => location.reload())
+        .catch(err => {
+          overlay.classList.remove('show');
+          // Non-empty category: server said pass cascade -- confirm the
+          // destructive version explicitly before retrying.
+          if (err.message.includes('cascade') &&
+              confirm(`"${name}" still has endpoints. Delete them too?`)) {
+            defsRequest('/admin/defs/category', 'DELETE', { name, cascade: true });
+          } else {
+            showToast(err.message);
+          }
+        });
     }
 
     function openEndpointForm() {
@@ -1124,8 +1163,7 @@
     // ---- Scenarios ----
 
     function loadScenarios() {
-      fetch('/admin/scenarios')
-        .then(r => r.json())
+      api('/admin/scenarios')
         .then(scenarios => {
           const bar = document.getElementById('scenario-bar');
           bar.replaceChildren();
@@ -1141,35 +1179,23 @@
           saveBtn.textContent = '+ Save current as...';
           saveBtn.onclick = saveCurrentScenario;
           bar.appendChild(saveBtn);
-        });
+        })
+        .catch(ignore);
     }
 
     function applyScenario(name) {
-      fetch('/admin/scenario/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      })
-      .then(r => r.json())
-      .then(() => {
-        showToast(`Scenario "${name}" applied — reloading`);
-        setTimeout(() => location.reload(), 600);
-      });
+      saveThenReload(api('/admin/scenario/apply', { method: 'POST', body: { name } }));
     }
 
     function saveCurrentScenario() {
       const name = prompt('Name this scenario:');
       if (!name) return;
-      fetch('/admin/scenario/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      })
-      .then(r => r.json())
-      .then(() => {
-        showToast(`Scenario "${name}" saved`);
-        loadScenarios();
-      });
+      trackPending(api('/admin/scenario/save', { method: 'POST', body: { name } }), 'Saving…')
+        .then(() => {
+          showToast(`Scenario "${name}" saved`);
+          loadScenarios();
+        })
+        .catch(ignore);
     }
 
     function showToast(msg) {
