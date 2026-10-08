@@ -33,3 +33,10 @@ def test_admin_page_script_is_valid_javascript(client, tmp_path):
 
 def test_body_editor_has_selection_label(client):
     assert 'id="editor-label-items_list"' in admin_html(client)
+
+
+def test_endpoint_rows_are_draggable_onto_categories(client):
+    html = admin_html(client)
+    assert 'draggable="true"' in html
+    assert 'ondrop="dropOnCategory(event, this)"' in html
+    assert "Move to category" in html
