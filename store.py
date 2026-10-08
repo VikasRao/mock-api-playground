@@ -66,6 +66,15 @@ def _redact_body(value):
     return value
 
 
+class SelectionChanged(Exception):
+    """The endpoint's active code/variant isn't the one the caller edited."""
+
+    def __init__(self, active_code, active_variant):
+        super().__init__(f"{active_code}/{active_variant}")
+        self.active_code = active_code
+        self.active_variant = active_variant
+
+
 class Store:
     DROP_HANG_SECONDS = 300
 
@@ -163,19 +172,35 @@ class Store:
     def reset_all(self) -> None:
         self.db.reset_state_to_defaults()
 
-    def set_custom_body(self, key: str, body: dict) -> None:
+    @staticmethod
+    def _check_selection(entry, expect_code, expect_variant):
+        """Inside an update_state fn: refuse to touch an override other than
+        the one the caller was looking at (either expectation may be None)."""
+        if ((expect_code is not None and expect_code != entry["active_code"])
+                or (expect_variant is not None
+                    and expect_variant != entry["active_variant"])):
+            raise SelectionChanged(entry["active_code"], entry["active_variant"])
+
+    def set_custom_body(self, key: str, body: dict,
+                        expect_code=None, expect_variant=None) -> None:
         if not isinstance(body, dict):
             raise ValueError("custom body must be a JSON object")
 
         def apply(entry):
+            self._check_selection(entry, expect_code, expect_variant)
             active = override_key(entry["active_code"], entry["active_variant"])
             entry["custom_bodies"][active] = body
 
         self.db.update_state(key, apply)
 
-    def reset_custom_body(self, key: str) -> None:
-        self.db.update_state(key, lambda e: e["custom_bodies"].pop(
-            override_key(e["active_code"], e["active_variant"]), None))
+    def reset_custom_body(self, key: str,
+                          expect_code=None, expect_variant=None) -> None:
+        def apply(entry):
+            self._check_selection(entry, expect_code, expect_variant)
+            entry["custom_bodies"].pop(
+                override_key(entry["active_code"], entry["active_variant"]), None)
+
+        self.db.update_state(key, apply)
 
     def set_network(self, key: str, network: dict) -> None:
         self.db.update_state(key, lambda e: e.update(network={
@@ -232,21 +257,25 @@ class Store:
             # skip rather than persist a state that would 500 every request.
             if snapshot["active_code"] not in endpoints[key]["responses"]:
                 continue
-            if "custom_bodies" in snapshot:
-                overrides = self.db.overrides_from_snapshot(snapshot)
-            else:
-                # Legacy snapshots predate per-variant overrides and carry at
-                # most one body, so they merge into (not wipe) existing ones.
-                overrides = dict(self._entry(key)["custom_bodies"])
-                if snapshot.get("custom_body") is not None:
-                    overrides[override_key(snapshot["active_code"],
-                                           snapshot["active_variant"])] = snapshot["custom_body"]
-            self.db.set_state(key, {
-                "active_code": snapshot["active_code"],
-                "active_variant": snapshot["active_variant"],
-                "custom_bodies": overrides,
-                "network": dict(snapshot["network"]),
-            })
+            def apply(entry, snapshot=snapshot):
+                if "custom_bodies" in snapshot:
+                    overrides = self.db.overrides_from_snapshot(snapshot)
+                else:
+                    # Legacy snapshots predate per-variant overrides and carry
+                    # at most one body, so they merge into (not wipe) existing
+                    # ones.
+                    overrides = dict(entry["custom_bodies"])
+                    if snapshot.get("custom_body") is not None:
+                        overrides[override_key(snapshot["active_code"],
+                                               snapshot["active_variant"])] = snapshot["custom_body"]
+                entry.update({
+                    "active_code": snapshot["active_code"],
+                    "active_variant": snapshot["active_variant"],
+                    "custom_bodies": overrides,
+                    "network": dict(snapshot["network"]),
+                })
+
+            self.db.update_state(key, apply)
         return True
 
     def save_scenario(self, name: str, keys: list = None) -> None:
@@ -257,6 +286,8 @@ class Store:
                 "active_code": state[key]["active_code"],
                 "active_variant": state[key]["active_variant"],
                 "custom_bodies": dict(state[key]["custom_bodies"]),
+                # Derived, for older code that only reads the single body.
+                "custom_body": state[key]["custom_body"],
                 "network": dict(state[key]["network"]),
             }
             for key in keys if key in state

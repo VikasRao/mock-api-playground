@@ -26,7 +26,7 @@ from flask import Flask, request, jsonify, render_template
 from db import Database
 from matcher import RouteMatcher
 from endpoints import ENDPOINTS, CATEGORY_ICONS, CATEGORY_COLORS, short_label
-from store import Store
+from store import SelectionChanged, Store
 
 def _load_env_file(path: Path | None = None) -> None:
     """Load the repo-root .env (or an explicit path, for tests) into the
@@ -148,6 +148,12 @@ def create_app(db_file: str | None = None) -> Flask:
             return jsonify({"error": "invalid key"}), 404
         return jsonify(store.selection(key))
 
+    def _selection_changed(key, payload, e):
+        return jsonify({"error": (
+            f"{key} is now on {e.active_code}/{e.active_variant} — the editor showed "
+            f"{payload.get('code')}/{payload.get('variant')}; reload it before saving"
+        )}), 409
+
     @app.route("/admin/set_body", methods=["POST"])
     def admin_set_body():
         payload = request.get_json(force=True)
@@ -156,9 +162,11 @@ def create_app(db_file: str | None = None) -> Flask:
         if key not in store.endpoints:
             return jsonify({"error": "invalid key"}), 400
         try:
-            store.set_custom_body(key, body)
+            store.set_custom_body(key, body, payload.get("code"), payload.get("variant"))
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        except SelectionChanged as e:
+            return _selection_changed(key, payload, e)
         return jsonify(store.selection(key))
 
     @app.route("/admin/reset_body", methods=["POST"])
@@ -167,7 +175,10 @@ def create_app(db_file: str | None = None) -> Flask:
         key = payload.get("key")
         if key not in store.endpoints:
             return jsonify({"error": "invalid key"}), 400
-        store.reset_custom_body(key)
+        try:
+            store.reset_custom_body(key, payload.get("code"), payload.get("variant"))
+        except SelectionChanged as e:
+            return _selection_changed(key, payload, e)
         return jsonify(store.selection(key))
 
     @app.route("/admin/set_network", methods=["POST"])

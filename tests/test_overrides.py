@@ -236,3 +236,35 @@ def test_legacy_scenario_merges_with_existing_override(app, client, store):
     client.post("/admin/scenario/apply", json={"name": "old"})
     assert store.state[KEY]["custom_bodies"] == {
         "200/normal": {"a": 1}, "404/normal": {"old": 1}}
+
+
+def test_saved_scenario_entries_carry_both_override_shapes(client, store):
+    set_body(client, {"a": 1})
+    client.post("/admin/scenario/save", json={"name": "both"})
+    entry = store.db.get_scenarios()["both"][KEY]
+    assert entry["custom_bodies"] == {"200/normal": {"a": 1}}
+    assert entry["custom_body"] == {"a": 1}
+
+
+def _override_rows(app, key):
+    return app.db._conn.execute(
+        "SELECT COUNT(*) FROM custom_bodies WHERE endpoint_key = ?", (key,)
+    ).fetchone()[0]
+
+
+def test_deleting_a_code_removes_its_overrides_and_keeps_others(client, store):
+    set_body(client, {"a": 1})
+    set_code(client, 404)
+    set_body(client, {"nf": 1})
+    set_code(client, 200)
+    resp = client.delete("/admin/defs/response", json={"key": KEY, "code": 404})
+    assert resp.status_code == 200
+    assert store.state[KEY]["custom_bodies"] == {"200/normal": {"a": 1}}
+
+
+def test_deleting_an_endpoint_removes_its_override_rows(app, client):
+    set_body(client, {"a": 1})
+    assert _override_rows(app, KEY) == 1
+    resp = client.delete("/admin/defs/endpoint", json={"key": KEY})
+    assert resp.status_code == 200
+    assert _override_rows(app, KEY) == 0

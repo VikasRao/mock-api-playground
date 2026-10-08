@@ -596,6 +596,10 @@
       const text = document.getElementById('editor-text-' + key);
       text.value = JSON.stringify(sel.body, null, 2);
       text.dataset.clean = text.value;
+      // What the editor shows; Save/Reset send it so a stale editor can't
+      // write to a different code/variant.
+      text.dataset.code = sel.code;
+      text.dataset.variant = sel.variant;
       document.getElementById('editor-label-' + key).textContent =
         `Editing ${sel.code} / ${sel.variant}` + (sel.is_custom ? ' · custom' : '');
     }
@@ -725,11 +729,23 @@
       }
     }
 
+    // The code/variant the editor was last loaded with, if known.
+    function shownSelection(key) {
+      const { code, variant } = document.getElementById('editor-text-' + key).dataset;
+      return code === undefined ? {} : { code: Number(code), variant };
+    }
+
+    // The button plus the chips, so a chip can't be clicked mid-request.
+    function editorControls(card, btnEl) {
+      return [btnEl, ...card.querySelectorAll('.code-btn, .variant-btn')];
+    }
+
     function saveBody(key, btnEl) {
       const parsed = readJsonInput('editor-text-' + key);
       if (parsed === null) return;
       const card = document.querySelector(`.card[data-key="${key}"]`);
-      withBusy(btnEl, api('/admin/set_body', { method: 'POST', body: { key, body: parsed } }))
+      withBusy(editorControls(card, btnEl), api('/admin/set_body', {
+        method: 'POST', body: { key, body: parsed, ...shownSelection(key) } }))
         .then(sel => {
           applySelection(card, sel);
           showToast(`${key} body saved`);
@@ -739,7 +755,8 @@
 
     function resetBody(key, btnEl) {
       const card = document.querySelector(`.card[data-key="${key}"]`);
-      withBusy(btnEl, api('/admin/reset_body', { method: 'POST', body: { key } }))
+      withBusy(editorControls(card, btnEl), api('/admin/reset_body', {
+        method: 'POST', body: { key, ...shownSelection(key) } }))
         .then(sel => {
           applySelection(card, sel);
           showToast(`${key} body reset`);
@@ -1294,7 +1311,7 @@
       if (validCat) selectCategory(validCat, { silent: true });
       // Not silent: on narrow screens a restored endpoint opens its detail
       // pane instead of dropping the user back on the category list.
-      if (saved.key && document.querySelector(`.ep-row[data-key="${saved.key}"]`)) {
+      if (saved.key && document.querySelector(`.ep-row[data-key="${CSS.escape(saved.key)}"]`)) {
         selectEndpoint(saved.key);
       }
       if (localStorage.getItem(LOG_OPEN_KEY) === '1') setLogOpen(true);
