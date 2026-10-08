@@ -136,8 +136,9 @@ changes only in the success path.
 - `withBusy(el, promise)`: disables `el`, adds a spinner class, restores
   on settle. For code/variant chips, all chips on that card are disabled
   for the duration, which serialises switches per endpoint.
-- A "Saving…"/"Loading…" pill at the top of the detail pane appears only
-  if the request is still pending after 300 ms.
+- A "Saving…"/"Loading…" pill, fixed at the top-right of the page so it
+  is visible on every pane, appears only if a request is still pending
+  after 300 ms.
 - Reloading actions (definition CRUD, import, restore built-ins, scenario
   apply) show a full-page "Saving…" overlay from request start until the
   reload; on error the overlay closes and the error is toasted.
