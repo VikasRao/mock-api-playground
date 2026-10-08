@@ -136,20 +136,23 @@ class Store:
         return label
 
     def set_code(self, key: str, code: int) -> None:
-        entry = self._entry(key)
-        entry.update(active_code=code, active_variant="normal", custom_body=None)
-        self.db.set_state(key, entry)
+        self.db.update_state(key, lambda e: e.update(
+            active_code=code, active_variant="normal", custom_body=None))
 
     def available_variants(self, key: str, code: int) -> list:
         return sorted(self.endpoints[key]["responses"][code].keys())
 
     def set_variant(self, key: str, variant: str) -> bool:
-        entry = self._entry(key)
-        if variant not in self.endpoints[key]["responses"][entry["active_code"]]:
-            return False
-        entry.update(active_variant=variant, custom_body=None)
-        self.db.set_state(key, entry)
-        return True
+        ok = False
+
+        def apply(entry):
+            nonlocal ok
+            if variant in self.endpoints[key]["responses"][entry["active_code"]]:
+                entry.update(active_variant=variant, custom_body=None)
+                ok = True
+
+        self.db.update_state(key, apply)
+        return ok
 
     def reset_all(self) -> None:
         self.db.reset_state_to_defaults()
@@ -157,23 +160,17 @@ class Store:
     def set_custom_body(self, key: str, body: dict) -> None:
         if not isinstance(body, dict):
             raise ValueError("custom body must be a JSON object")
-        entry = self._entry(key)
-        entry["custom_body"] = body
-        self.db.set_state(key, entry)
+        self.db.update_state(key, lambda e: e.update(custom_body=body))
 
     def reset_custom_body(self, key: str) -> None:
-        entry = self._entry(key)
-        entry["custom_body"] = None
-        self.db.set_state(key, entry)
+        self.db.update_state(key, lambda e: e.update(custom_body=None))
 
     def set_network(self, key: str, network: dict) -> None:
-        entry = self._entry(key)
-        entry["network"] = {
+        self.db.update_state(key, lambda e: e.update(network={
             "delay": network.get("delay"),
             "drop": bool(network.get("drop", False)),
             "flaky": network.get("flaky"),
-        }
-        self.db.set_state(key, entry)
+        }))
 
     def apply_network(self, key: str) -> None:
         net = self._entry(key)["network"]

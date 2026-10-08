@@ -74,23 +74,27 @@ class Database:
     # -- reads ----------------------------------------------------------
 
     def get_categories(self) -> list:
-        rows = self._conn.execute(
-            "SELECT name, icon, color, position FROM categories ORDER BY position"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, icon, color, position FROM categories ORDER BY position"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_endpoints(self) -> dict:
+        with self._lock:
+            endpoint_rows = self._conn.execute(
+                "SELECT key, category, method, path FROM endpoints ORDER BY position"
+            ).fetchall()
+            response_rows = self._conn.execute(
+                "SELECT endpoint_key, code, variant, body_json FROM responses"
+            ).fetchall()
         eps = {}
-        for r in self._conn.execute(
-            "SELECT key, category, method, path FROM endpoints ORDER BY position"
-        ):
+        for r in endpoint_rows:
             eps[r["key"]] = {
                 "category": r["category"], "method": r["method"],
                 "path": r["path"], "responses": {},
             }
-        for r in self._conn.execute(
-            "SELECT endpoint_key, code, variant, body_json FROM responses"
-        ):
+        for r in response_rows:
             eps[r["endpoint_key"]]["responses"].setdefault(r["code"], {})[
                 r["variant"]] = json.loads(r["body_json"])
         return eps
@@ -116,11 +120,13 @@ class Database:
         }
 
     def get_state(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, active_code, active_variant, custom_body_json, network_json"
+                " FROM endpoint_state"
+            ).fetchall()
         state = {}
-        for r in self._conn.execute(
-            "SELECT key, active_code, active_variant, custom_body_json, network_json"
-            " FROM endpoint_state"
-        ):
+        for r in rows:
             state[r["key"]] = {
                 "active_code": r["active_code"],
                 "active_variant": r["active_variant"],
@@ -146,6 +152,16 @@ class Database:
                  json.dumps(entry["network"])),
             )
 
+    def update_state(self, key: str, fn) -> dict:
+        """Atomic read-modify-write of one endpoint's state: fn(entry)
+        mutates the entry in place while the lock is held, so concurrent
+        admin requests can't overwrite each other's changes."""
+        with self._lock:
+            entry = self.get_state()[key]
+            fn(entry)
+            self.set_state(key, entry)
+            return entry
+
     def reset_state_to_defaults(self) -> None:
         for key in self.get_endpoints():
             self.set_state(key, self.default_state_entry(key))
@@ -153,10 +169,10 @@ class Database:
     # -- scenarios ------------------------------------------------------
 
     def get_scenarios(self) -> dict:
-        return {
-            r["name"]: json.loads(r["snapshot_json"])
-            for r in self._conn.execute("SELECT name, snapshot_json FROM scenarios")
-        }
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, snapshot_json FROM scenarios").fetchall()
+        return {r["name"]: json.loads(r["snapshot_json"]) for r in rows}
 
     def save_scenario(self, name: str, snapshot: dict) -> None:
         with self._lock, self._conn:
