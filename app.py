@@ -129,7 +129,7 @@ def create_app(db_file: str | None = None) -> Flask:
         if key not in store.endpoints or code not in store.endpoints[key]["responses"]:
             return jsonify({"error": "invalid key or code"}), 400
         store.set_code(key, code)
-        return jsonify({"key": key, "code": code})
+        return jsonify(store.selection(key))
 
     @app.route("/admin/set_variant", methods=["POST"])
     def admin_set_variant():
@@ -140,14 +140,13 @@ def create_app(db_file: str | None = None) -> Flask:
             return jsonify({"error": "invalid key"}), 400
         if not store.set_variant(key, variant):
             return jsonify({"error": "invalid variant for current code"}), 400
-        return jsonify({"key": key, "variant": variant})
+        return jsonify(store.selection(key))
 
     @app.route("/admin/body/<key>")
     def admin_get_body(key):
         if key not in store.endpoints:
             return jsonify({"error": "invalid key"}), 404
-        code = store.state[key]["active_code"]
-        return jsonify({"body": store.active_body(key, code)})
+        return jsonify(store.selection(key))
 
     @app.route("/admin/set_body", methods=["POST"])
     def admin_set_body():
@@ -160,7 +159,7 @@ def create_app(db_file: str | None = None) -> Flask:
             store.set_custom_body(key, body)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
-        return jsonify({"key": key, "ok": True})
+        return jsonify(store.selection(key))
 
     @app.route("/admin/reset_body", methods=["POST"])
     def admin_reset_body():
@@ -169,7 +168,7 @@ def create_app(db_file: str | None = None) -> Flask:
         if key not in store.endpoints:
             return jsonify({"error": "invalid key"}), 400
         store.reset_custom_body(key)
-        return jsonify({"key": key, "ok": True})
+        return jsonify(store.selection(key))
 
     @app.route("/admin/set_network", methods=["POST"])
     def admin_set_network():

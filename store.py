@@ -131,6 +131,15 @@ class Store:
         _, label = self._resolve_body_and_label(key, code)
         return label
 
+    def selection(self, key: str) -> dict:
+        """The endpoint's active code+variant and the body it serves, as
+        returned by the admin state routes."""
+        entry = self._entry(key)
+        code = entry["active_code"]
+        body, label = self._resolve_body_and_label(key, code)
+        return {"key": key, "code": code, "variant": entry["active_variant"],
+                "body": body, "is_custom": label == "custom"}
+
     def set_code(self, key: str, code: int) -> None:
         # Overrides are per code+variant, so switching never discards them.
         self.db.update_state(key, lambda e: e.update(
