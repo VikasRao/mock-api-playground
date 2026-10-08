@@ -12,6 +12,7 @@ import time
 from collections import deque
 
 from scenarios import BUILTIN_SCENARIOS
+from db import override_key
 
 REDACTED = "***redacted***"
 
@@ -105,23 +106,18 @@ class Store:
         return variants.get(variant, variants["normal"])
 
     def _resolve_body_and_label(self, key: str, code: int) -> tuple:
-        """Return (body, label) for the body that active_body would serve,
-        where label is what was *actually* used to produce it -- "custom"
-        for a saved custom body, or the real variant name (which may be
-        "normal" due to the header-override fallback below, even when the
-        UI's active_variant is something else). Used so request-log entries
-        can record what was truly served instead of blindly reading the
-        UI's active_variant.
+        """Return (body, label) for what active_body serves: the override for
+        the code+variant being served (label "custom") or that variant's
+        body (label = real variant name). When code comes from an
+        x-mock-response-code header that differs from the UI selection, the
+        served variant is that code's "normal". Used so request-log entries
+        record what was truly served.
         """
         entry = self._entry(key)
-        if entry["active_code"] != code:
-            # code came from a header override that differs from the UI
-            # selection -- ignore any custom body/variant meant for a
-            # different code and serve that code's normal variant.
-            return self.variant_body(key, code, "normal"), "normal"
-        if entry["custom_body"] is not None:
-            return entry["custom_body"], "custom"
-        variant = entry["active_variant"]
+        variant = entry["active_variant"] if code == entry["active_code"] else "normal"
+        override = entry["custom_bodies"].get(override_key(code, variant))
+        if override is not None:
+            return override, "custom"
         return self.variant_body(key, code, variant), variant
 
     def active_body(self, key: str, code: int) -> dict:
@@ -136,8 +132,9 @@ class Store:
         return label
 
     def set_code(self, key: str, code: int) -> None:
+        # Overrides are per code+variant, so switching never discards them.
         self.db.update_state(key, lambda e: e.update(
-            active_code=code, active_variant="normal", custom_body=None))
+            active_code=code, active_variant="normal"))
 
     def available_variants(self, key: str, code: int) -> list:
         return sorted(self.endpoints[key]["responses"][code].keys())
@@ -148,7 +145,7 @@ class Store:
         def apply(entry):
             nonlocal ok
             if variant in self.endpoints[key]["responses"][entry["active_code"]]:
-                entry.update(active_variant=variant, custom_body=None)
+                entry["active_variant"] = variant
                 ok = True
 
         self.db.update_state(key, apply)
@@ -160,10 +157,16 @@ class Store:
     def set_custom_body(self, key: str, body: dict) -> None:
         if not isinstance(body, dict):
             raise ValueError("custom body must be a JSON object")
-        self.db.update_state(key, lambda e: e.update(custom_body=body))
+
+        def apply(entry):
+            active = override_key(entry["active_code"], entry["active_variant"])
+            entry["custom_bodies"][active] = body
+
+        self.db.update_state(key, apply)
 
     def reset_custom_body(self, key: str) -> None:
-        self.db.update_state(key, lambda e: e.update(custom_body=None))
+        self.db.update_state(key, lambda e: e["custom_bodies"].pop(
+            override_key(e["active_code"], e["active_variant"]), None))
 
     def set_network(self, key: str, network: dict) -> None:
         self.db.update_state(key, lambda e: e.update(network={
@@ -223,7 +226,7 @@ class Store:
             self.db.set_state(key, {
                 "active_code": snapshot["active_code"],
                 "active_variant": snapshot["active_variant"],
-                "custom_body": snapshot["custom_body"],
+                "custom_bodies": self.db.overrides_from_snapshot(snapshot),
                 "network": dict(snapshot["network"]),
             })
         return True
@@ -235,7 +238,7 @@ class Store:
             key: {
                 "active_code": state[key]["active_code"],
                 "active_variant": state[key]["active_variant"],
-                "custom_body": state[key]["custom_body"],
+                "custom_bodies": dict(state[key]["custom_bodies"]),
                 "network": dict(state[key]["network"]),
             }
             for key in keys if key in state

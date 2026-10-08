@@ -53,9 +53,35 @@ CREATE TABLE IF NOT EXISTS scenarios (
   name          TEXT PRIMARY KEY,
   snapshot_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS custom_bodies (
+  endpoint_key TEXT NOT NULL REFERENCES endpoints(key) ON DELETE CASCADE,
+  code         INTEGER NOT NULL,
+  variant      TEXT NOT NULL,
+  body_json    TEXT NOT NULL,
+  PRIMARY KEY (endpoint_key, code, variant)
+);
 """
 
 DEFAULT_NETWORK = {"delay": None, "drop": False, "flaky": None}
+
+# v1: single custom body per endpoint (endpoint_state.custom_body_json).
+# v2: one override per endpoint+code+variant in custom_bodies; the old
+# column is left in place but always NULL.
+SCHEMA_VERSION = 2
+
+
+def override_key(code, variant) -> str:
+    """Key of an override in state["custom_bodies"], e.g. "200/normal"."""
+    return f"{code}/{variant}"
+
+
+def parse_override_key(k):
+    """(code, variant) for an override key, or None if malformed. Splits on
+    the first "/" only, since variant names may contain "/"."""
+    code, sep, variant = str(k).partition("/")
+    if not sep or not code.isdigit() or not variant:
+        return None
+    return int(code), variant
 
 
 class Database:
@@ -122,35 +148,75 @@ class Database:
     def get_state(self) -> dict:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, active_code, active_variant, custom_body_json, network_json"
+                "SELECT key, active_code, active_variant, network_json"
                 " FROM endpoint_state"
             ).fetchall()
+            override_rows = self._conn.execute(
+                "SELECT endpoint_key, code, variant, body_json FROM custom_bodies"
+            ).fetchall()
+        overrides = {}
+        for r in override_rows:
+            overrides.setdefault(r["endpoint_key"], {})[
+                override_key(r["code"], r["variant"])] = json.loads(r["body_json"])
         state = {}
         for r in rows:
+            bodies = overrides.get(r["key"], {})
             state[r["key"]] = {
                 "active_code": r["active_code"],
                 "active_variant": r["active_variant"],
-                "custom_body": json.loads(r["custom_body_json"])
-                if r["custom_body_json"] is not None else None,
+                # Derived: the override that applies to the active selection.
+                "custom_body": bodies.get(
+                    override_key(r["active_code"], r["active_variant"])),
+                "custom_bodies": bodies,
                 "network": json.loads(r["network_json"]),
             }
         return state
 
     def set_state(self, key: str, entry: dict) -> None:
+        """Persist one endpoint's runtime state. entry["custom_bodies"]
+        replaces the endpoint's whole override set; overrides for a
+        code+variant the endpoint doesn't define, or whose body isn't a JSON
+        object, are dropped. The derived entry["custom_body"] is ignored --
+        use overrides_from_snapshot() for legacy single-body input."""
+        responses = self.get_endpoint(key)["responses"]
+        overrides = []
+        for k, body in (entry.get("custom_bodies") or {}).items():
+            parsed = parse_override_key(k)
+            if parsed is None or not isinstance(body, dict):
+                continue
+            code, variant = parsed
+            if variant in responses.get(code, {}):
+                overrides.append((key, code, variant, json.dumps(body)))
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO endpoint_state"
                 " (key, active_code, active_variant, custom_body_json, network_json)"
-                " VALUES (?, ?, ?, ?, ?)"
+                " VALUES (?, ?, ?, NULL, ?)"
                 " ON CONFLICT(key) DO UPDATE SET active_code=excluded.active_code,"
                 "  active_variant=excluded.active_variant,"
-                "  custom_body_json=excluded.custom_body_json,"
+                "  custom_body_json=NULL,"
                 "  network_json=excluded.network_json",
                 (key, entry["active_code"], entry["active_variant"],
-                 json.dumps(entry["custom_body"])
-                 if entry["custom_body"] is not None else None,
                  json.dumps(entry["network"])),
             )
+            self._conn.execute(
+                "DELETE FROM custom_bodies WHERE endpoint_key = ?", (key,))
+            self._conn.executemany(
+                "INSERT INTO custom_bodies (endpoint_key, code, variant, body_json)"
+                " VALUES (?, ?, ?, ?)", overrides)
+
+    @staticmethod
+    def overrides_from_snapshot(entry: dict) -> dict:
+        """Overrides carried by a scenario snapshot or export state entry.
+        v2 entries have "custom_bodies"; older ones have a single
+        "custom_body" meant for the entry's active code+variant."""
+        if "custom_bodies" in entry:
+            return dict(entry["custom_bodies"] or {})
+        if entry.get("custom_body") is not None:
+            return {override_key(entry.get("active_code"),
+                                 entry.get("active_variant", "normal")):
+                    entry["custom_body"]}
+        return {}
 
     def update_state(self, key: str, fn) -> dict:
         """Atomic read-modify-write of one endpoint's state: fn(entry)
@@ -186,7 +252,11 @@ class Database:
 
     def seed_if_empty(self, seed_endpoints, icons, colors,
                       legacy_state_file=None) -> bool:
-        if self._conn.execute("PRAGMA user_version").fetchone()[0] == 1:
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 1:
+            self._migrate_v1_to_v2()
+            return False
+        if version >= SCHEMA_VERSION:
             return False
         with self._lock, self._conn:
             self._seed_categories(seed_endpoints, icons, colors)
@@ -198,9 +268,32 @@ class Database:
         if legacy_state_file is not None:
             self._import_legacy_state(Path(legacy_state_file))
         with self._lock, self._conn:
-            self._conn.execute("PRAGMA user_version = 1")
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.definitions_version += 1
         return True
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Move each endpoint's single v1 custom body to custom_bodies at
+        that endpoint's active code+variant."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO custom_bodies"
+                " (endpoint_key, code, variant, body_json)"
+                " SELECT key, active_code, active_variant, custom_body_json"
+                " FROM endpoint_state WHERE custom_body_json IS NOT NULL")
+            self._conn.execute("UPDATE endpoint_state SET custom_body_json = NULL")
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._prune_orphan_overrides()
+
+    def _prune_orphan_overrides(self) -> None:
+        """Drop overrides whose code+variant no longer has a response."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM custom_bodies WHERE NOT EXISTS ("
+                " SELECT 1 FROM responses r"
+                " WHERE r.endpoint_key = custom_bodies.endpoint_key"
+                " AND r.code = custom_bodies.code"
+                " AND r.variant = custom_bodies.variant)")
 
     def _seed_categories(self, seed_endpoints, icons, colors) -> None:
         # Only called on an empty DB (seed_if_empty); restore_builtins does
@@ -266,8 +359,10 @@ class Database:
             network = dict(default["network"])
             network.update(merged.get("network") or {})
             merged["network"] = network
+            overrides = self.overrides_from_snapshot(merged)
             if merged.get("active_code") not in endpoints[key]["responses"]:
                 merged = default
+            merged["custom_bodies"] = overrides
             self.set_state(key, merged)
         for name, snapshot in on_disk.get("scenarios", {}).items():
             self.save_scenario(name, snapshot)
@@ -344,7 +439,11 @@ class Database:
         variants = cfg["responses"].get(entry["active_code"], {})
         if entry["active_code"] not in cfg["responses"] or \
                 entry["active_variant"] not in variants:
-            self.set_state(key, self.default_state_entry(key))
+            # The selection is gone, but overrides for other code+variants
+            # are still valid -- keep them (set_state drops the stale ones).
+            fresh = self.default_state_entry(key)
+            fresh["custom_bodies"] = entry["custom_bodies"]
+            self.set_state(key, fresh)
 
     # -- category CRUD --------------------------------------------------
 
@@ -503,6 +602,7 @@ class Database:
                 self._conn.execute(
                     "DELETE FROM responses WHERE endpoint_key = ? AND code = ?"
                     " AND variant = ?", (key, code, variant))
+        self._prune_orphan_overrides()
         self._reset_state_if_invalid(key)
         self._bump()
 
@@ -538,6 +638,7 @@ class Database:
             raise ValueError(
                 "restore conflicts with a user-added endpoint on the same"
                 f" method+path -- delete or move it first ({e})")
+        self._prune_orphan_overrides()
         for key in seed_endpoints:
             self._reset_state_if_invalid(key)
         self._bump()
@@ -614,8 +715,8 @@ class Database:
 
         if mode == "replace":
             with self._lock, self._conn:
-                for table in ("responses", "endpoint_state", "endpoints",
-                              "categories", "scenarios"):
+                for table in ("custom_bodies", "responses", "endpoint_state",
+                              "endpoints", "categories", "scenarios"):
                     self._conn.execute(f"DELETE FROM {table}")
         for c in categories:
             name = self._require_name(c.get("name"), "category name")
@@ -635,8 +736,10 @@ class Database:
             default = self.default_state_entry(key)
             merged = dict(default)
             merged.update(entry)
+            overrides = self.overrides_from_snapshot(merged)
             if merged.get("active_code") not in self.get_endpoint(key)["responses"]:
                 merged = default
+            merged["custom_bodies"] = overrides
             self.set_state(key, merged)
         for name, snapshot in (payload.get("scenarios") or {}).items():
             self.save_scenario(name, snapshot)
