@@ -29,3 +29,7 @@ def test_admin_page_script_is_valid_javascript(client, tmp_path):
     result = subprocess.run(["node", "--check", str(js)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_body_editor_has_selection_label(client):
+    assert 'id="editor-label-items_list"' in admin_html(client)
