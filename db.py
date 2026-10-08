@@ -211,7 +211,8 @@ class Database:
         v2 entries have "custom_bodies"; older ones have a single
         "custom_body" meant for the entry's active code+variant."""
         if "custom_bodies" in entry:
-            return dict(entry["custom_bodies"] or {})
+            bodies = entry["custom_bodies"]
+            return dict(bodies) if isinstance(bodies, dict) else {}
         if entry.get("custom_body") is not None:
             return {override_key(entry.get("active_code"),
                                  entry.get("active_variant", "normal")):
@@ -704,6 +705,12 @@ class Database:
             self._require_name(key, "endpoint key")
             self._validate_key_format(key)
             self._validate_route_shape(cfg["method"], cfg["path"])
+        for key, entry in (payload.get("state") or {}).items():
+            if not isinstance(entry, dict):
+                raise ValueError(f"state '{key}': entry must be an object")
+            if "custom_bodies" in entry and entry["custom_bodies"] is not None \
+                    and not isinstance(entry["custom_bodies"], dict):
+                raise ValueError(f"state '{key}': custom_bodies must be an object")
         # Detect intra-payload route duplicates
         seen_routes = {}
         for key, cfg in endpoints.items():

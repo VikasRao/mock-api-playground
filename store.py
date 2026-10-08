@@ -223,10 +223,19 @@ class Store:
             # skip rather than persist a state that would 500 every request.
             if snapshot["active_code"] not in endpoints[key]["responses"]:
                 continue
+            if "custom_bodies" in snapshot:
+                overrides = self.db.overrides_from_snapshot(snapshot)
+            else:
+                # Legacy snapshots predate per-variant overrides and carry at
+                # most one body, so they merge into (not wipe) existing ones.
+                overrides = dict(self._entry(key)["custom_bodies"])
+                if snapshot.get("custom_body") is not None:
+                    overrides[override_key(snapshot["active_code"],
+                                           snapshot["active_variant"])] = snapshot["custom_body"]
             self.db.set_state(key, {
                 "active_code": snapshot["active_code"],
                 "active_variant": snapshot["active_variant"],
-                "custom_bodies": self.db.overrides_from_snapshot(snapshot),
+                "custom_bodies": overrides,
                 "network": dict(snapshot["network"]),
             })
         return True
